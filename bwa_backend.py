@@ -115,7 +115,7 @@ class State(TypedDict):
 # 2) LLM
 # -----------------------------
 # llm = ChatOpenAI(model="gpt-4.1-mini")
-llm = ChatGroq(model="llama-3.3-70b-versatile")
+llm = ChatGroq(model="openai/gpt-oss-120b")
 
 # -----------------------------
 # 3) Router
@@ -206,13 +206,24 @@ Rules:
 """
 
 def research_node(state: State) -> dict:
-    queries = (state.get("queries") or [])[:10]
+    queries = (state.get("queries") or [])[:5]
     raw: List[dict] = []
     for q in queries:
-        raw.extend(_tavily_search(q, max_results=6))
+        raw.extend(_tavily_search(q, max_results=3))
 
     if not raw:
         return {"evidence": []}
+
+    raw = [
+        {
+            "title": str(result.get("title") or "")[:160],
+            "url": str(result.get("url") or "")[:500],
+            "snippet": str(result.get("snippet") or "")[:400],
+            "published_at": str(result.get("published_at") or "")[:40],
+            "source": str(result.get("source") or "")[:80],
+        }
+        for result in raw[:10]
+    ]
 
     extractor = llm.with_structured_output(EvidencePack)
     pack = extractor.invoke(

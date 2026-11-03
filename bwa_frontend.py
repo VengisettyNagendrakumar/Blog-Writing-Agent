@@ -53,29 +53,14 @@ def images_zip(images_dir: Path) -> Optional[bytes]:
 
 def try_stream(graph_app, inputs: Dict[str, Any]) -> Iterator[Tuple[str, Any]]:
     """
-    Stream graph progress if available; else invoke.
-    Yields ("updates"/"values"/"final", payload).
+    Stream graph progress and return the accumulated final state.
+    Graph errors propagate instead of rerunning the workflow.
     """
-    try:
-        for step in graph_app.stream(inputs, stream_mode="updates"):
-            yield ("updates", step)
-        out = graph_app.invoke(inputs)
-        yield ("final", out)
-        return
-    except Exception:
-        pass
-
-    try:
-        for step in graph_app.stream(inputs, stream_mode="values"):
-            yield ("values", step)
-        out = graph_app.invoke(inputs)
-        yield ("final", out)
-        return
-    except Exception:
-        pass
-
-    out = graph_app.invoke(inputs)
-    yield ("final", out)
+    current_state = dict(inputs)
+    for step in graph_app.stream(inputs, stream_mode="updates"):
+        yield ("updates", step)
+        current_state = extract_latest_state(current_state, step)
+    yield ("final", current_state)
 
 
 def extract_latest_state(current_state: Dict[str, Any], step_payload: Any) -> Dict[str, Any]:
@@ -165,7 +150,10 @@ def list_past_blogs() -> List[Path]:
     Filters out obvious non-blog markdown files if needed.
     """
     cwd = Path(".")
-    files = [p for p in cwd.glob("*.md") if p.is_file()]
+    files = [
+        p for p in cwd.glob("*.md")
+        if p.is_file() and p.name.casefold() != "readme.md"
+    ]
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return files
 
@@ -219,7 +207,9 @@ with st.sidebar:
                 title = extract_title_from_md(md_text, p.stem)
             except Exception:
                 title = p.stem
-            label = f"{title}  ·  {p.name}"
+            label = title
+            if label in file_by_label:
+                label = f"{title}  ·  {p.name}"
             options.append(label)
             file_by_label[label] = p
 
