@@ -141,27 +141,6 @@ def render_markdown_with_local_images(md: str):
         i += 1
 
 
-# -----------------------------
-# ✅ NEW: Past blogs helpers
-# -----------------------------
-def list_past_blogs() -> List[Path]:
-    """
-    Returns .md files in current working directory, newest first.
-    Filters out obvious non-blog markdown files if needed.
-    """
-    cwd = Path(".")
-    files = [
-        p for p in cwd.glob("*.md")
-        if p.is_file() and p.name.casefold() != "readme.md"
-    ]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return files
-
-
-def read_md_file(p: Path) -> str:
-    return p.read_text(encoding="utf-8", errors="replace")
-
-
 def extract_title_from_md(md: str, fallback: str) -> str:
     """
     Use first '# ' heading as title if present.
@@ -189,57 +168,6 @@ with st.sidebar:
     as_of = st.date_input("As-of date", value=date.today())
     run_btn = st.button("🚀 Generate Blog", type="primary")
 
-    # ✅ NEW: Past blogs list (keeps everything else intact)
-    st.divider()
-    st.subheader("Past blogs")
-
-    past_files = list_past_blogs()
-    if not past_files:
-        st.caption("No saved blogs found (*.md in current folder).")
-        selected_md_file = None
-    else:
-        # Build labels from file name + (optional) parsed title
-        options: List[str] = []
-        file_by_label: Dict[str, Path] = {}
-        for p in past_files[:50]:
-            try:
-                md_text = read_md_file(p)
-                title = extract_title_from_md(md_text, p.stem)
-            except Exception:
-                title = p.stem
-            label = title
-            if label in file_by_label:
-                label = f"{title}  ·  {p.name}"
-            options.append(label)
-            file_by_label[label] = p
-
-        selected_label = st.radio(
-            "Select a blog to load",
-            options=options,
-            index=0,
-            label_visibility="collapsed",
-        )
-        selected_md_file = file_by_label.get(selected_label)
-
-        if st.button("📂 Load selected blog"):
-            if selected_md_file:
-                md_text = read_md_file(selected_md_file)
-                # Load into session_state as if it were a run output
-                st.session_state["last_out"] = {
-                    "plan": None,          # old files don't include plan
-                    "evidence": [],        # old files don't include evidence
-                    "image_specs": [],     # optional (not persisted)
-                    "final": md_text,      # markdown body
-                }
-                # also update the topic input to the title (best-effort) without changing UI
-                st.session_state["topic_prefill"] = extract_title_from_md(md_text, selected_md_file.stem)
-
-    
-
-# Keep your topic input as-is; optionally prefill for next run after loading a blog
-if "topic_prefill" in st.session_state and isinstance(st.session_state["topic_prefill"], str):
-    # Do not mutate widgets; just keep as a hint.
-    pass
 
 # Storage for latest run
 if "last_out" not in st.session_state:
