@@ -73,7 +73,8 @@ class EvidencePack(BaseModel):
 
 # ---- Image planning schema (ported from your image flow) ----
 class ImageSpec(BaseModel):
-    placeholder: str = Field(..., description="e.g. [[IMAGE_1]]")
+    placeholder: str = ""
+    section_heading: str = Field(..., description="Exact Markdown heading where the image belongs.")
     filename: str = Field(..., description="Save under images/, e.g. qkv_flow.png")
     alt: str
     caption: str
@@ -83,7 +84,6 @@ class ImageSpec(BaseModel):
 
 
 class GlobalImagePlan(BaseModel):
-    md_with_placeholders: str
     images: List[ImageSpec] = Field(default_factory=list)
 
 class State(TypedDict):
@@ -406,8 +406,7 @@ Decide if images/diagrams are needed for THIS blog.
 Rules:
 - Max 3 images total.
 - Each image must materially improve understanding (diagram/flow/table-like visual).
-- Insert placeholders exactly: [[IMAGE_1]], [[IMAGE_2]], [[IMAGE_3]].
-- If no images needed: md_with_placeholders must equal input and images=[].
+- Choose section_heading exactly from the provided Markdown headings.
 - Avoid decorative images; prefer technical diagrams with short labels.
 Return strictly GlobalImagePlan.
 """
@@ -417,6 +416,12 @@ def decide_images(state: State) -> dict:
     merged_md = state["merged_md"]
     plan = state["plan"]
     assert plan is not None
+    headings = re.findall(r"^#{1,3}\s+.+$", merged_md, flags=re.MULTILINE)
+    if not headings:
+        return {"md_with_placeholders": merged_md, "image_specs": []}
+    section_headings = [
+        heading for heading in headings if not re.match(r"^#\s", heading)
+    ] or headings
 
     image_plan = planner.invoke(
         [
@@ -425,16 +430,48 @@ def decide_images(state: State) -> dict:
                 content=(
                     f"Blog kind: {plan.blog_kind}\n"
                     f"Topic: {state['topic']}\n\n"
-                    "Insert placeholders + propose image prompts.\n\n"
-                    f"{merged_md}"
+                    "Choose up to 3 useful images based on these section headings. "
+                    "Do not return or rewrite the article. Return only image metadata.\n"
+                    "Available headings:\n"
+                    + "\n".join(section_headings)
                 )
             ),
         ]
     )
 
+    image_specs = []
+    placements = {}
+    heading_by_normalized = {
+        heading.lstrip("#").strip().casefold(): heading for heading in section_headings
+    }
+    for spec in image_plan.images[:3]:
+        heading = heading_by_normalized.get(spec.section_heading.lstrip("#").strip().casefold())
+        if heading is None:
+            heading = section_headings[len(image_specs) % len(section_headings)]
+        placeholder = f"[[IMAGE_{len(image_specs) + 1}]]"
+        image_specs.append(
+            {
+                **spec.model_dump(),
+                "placeholder": placeholder,
+                "section_heading": heading,
+                "filename": Path(spec.filename).name,
+            }
+        )
+        placements.setdefault(heading, []).append(placeholder)
+
+    markdown_lines = []
+    for line in merged_md.splitlines():
+        markdown_lines.append(line)
+        for placeholder in placements.get(line, []):
+            markdown_lines.append("")
+            markdown_lines.append(placeholder)
+    md_with_placeholders = "\n".join(markdown_lines)
+    if merged_md.endswith("\n"):
+        md_with_placeholders += "\n"
+
     return {
-        "md_with_placeholders": image_plan.md_with_placeholders,
-        "image_specs": [img.model_dump() for img in image_plan.images],
+        "md_with_placeholders": md_with_placeholders,
+        "image_specs": image_specs,
     }
 
 
