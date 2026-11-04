@@ -10,9 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, List, Iterator, Tuple
 
 import pandas as pd
-import requests
 import streamlit as st
-from streamlit.errors import StreamlitSecretNotFoundError
 
 # -----------------------------
 # Import your compiled LangGraph app
@@ -73,54 +71,6 @@ def extract_latest_state(current_state: Dict[str, Any], step_payload: Any) -> Di
         else:
             current_state.update(step_payload)
     return current_state
-
-
-def _supabase_config() -> Optional[Tuple[str, str]]:
-    try:
-        url = os.getenv("SUPABASE_URL") or st.secrets.get("SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or st.secrets.get(
-            "SUPABASE_SERVICE_ROLE_KEY"
-        )
-    except StreamlitSecretNotFoundError:
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-
-    if not url or not key:
-        return None
-    return str(url).rstrip("/"), str(key)
-
-
-def _call_counter_rpc(function_name: str) -> int:
-    config = _supabase_config()
-    if config is None:
-        raise RuntimeError(
-            "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Streamlit secrets."
-        )
-
-    url, key = config
-    response = requests.post(
-        f"{url}/rest/v1/rpc/{function_name}",
-        headers={
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        },
-        json={},
-        timeout=10,
-    )
-    response.raise_for_status()
-    count = response.json()
-    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-        raise ValueError(f"Supabase RPC {function_name} returned an invalid count.")
-    return count
-
-
-def get_blog_count() -> int:
-    return _call_counter_rpc("get_blog_generation_count")
-
-
-def increment_blog_count() -> int:
-    return _call_counter_rpc("increment_blog_generation_count")
 
 
 # -----------------------------
@@ -208,14 +158,10 @@ def extract_title_from_md(md: str, fallback: str) -> str:
 st.set_page_config(page_title="LangGraph Blog Writer", layout="wide")
 
 st.title("Blog Writing Agent")
-counter_metric = st.empty()
-try:
-    blog_count = get_blog_count()
-except (requests.RequestException, RuntimeError, ValueError) as error:
-    counter_metric.metric("Blogs generated", "—")
-    st.caption(f"Shared counter unavailable: {error}")
-else:
-    counter_metric.metric("Blogs generated", blog_count)
+if "blogs_generated" not in st.session_state:
+    st.session_state["blogs_generated"] = 0
+blogs_generated_metric = st.empty()
+blogs_generated_metric.metric("Blogs generated", st.session_state["blogs_generated"])
 
 with st.sidebar:
     st.header("Generate New Blog")
@@ -297,14 +243,12 @@ if run_btn:
         elif kind == "final":
             out = payload
             st.session_state["last_out"] = out
+            st.session_state["blogs_generated"] += 1
+            blogs_generated_metric.metric(
+                "Blogs generated", st.session_state["blogs_generated"]
+            )
             status.update(label="✅ Done", state="complete", expanded=False)
             log("[final] received final state")
-            try:
-                blog_count = increment_blog_count()
-            except (requests.RequestException, RuntimeError, ValueError) as error:
-                st.error(f"Blog generated, but the shared counter could not update: {error}")
-            else:
-                counter_metric.metric("Blogs generated", blog_count)
 
 # Render last result (if any)
 out = st.session_state.get("last_out")
