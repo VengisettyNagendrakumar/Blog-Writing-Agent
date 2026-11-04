@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, List, Iterator, Tuple
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 # -----------------------------
 # Import your compiled LangGraph app
@@ -157,9 +158,40 @@ def extract_title_from_md(md: str, fallback: str) -> str:
 # -----------------------------
 st.set_page_config(page_title="LangGraph Blog Writer", layout="wide")
 
+blog_count_storage = components.declare_component(
+    "blog_count_storage",
+    path=str(Path(__file__).parent / "blog_count_storage"),
+)
+
 st.title("Blog Writing Agent")
 if "blogs_generated" not in st.session_state:
     st.session_state["blogs_generated"] = 102
+if "blogs_generated_loaded" not in st.session_state:
+    st.session_state["blogs_generated_loaded"] = False
+
+stored_blog_count = blog_count_storage(
+    storage_key="blog-writing-agent:blogs-generated",
+    initial_count=102,
+    count=st.session_state["blogs_generated"],
+    key="blog_count_storage",
+    default=None,
+    height=0,
+)
+storage_error = None
+if isinstance(stored_blog_count, dict):
+    storage_error = stored_blog_count.get("error")
+    saved_count = stored_blog_count.get("count")
+    if (
+        not st.session_state["blogs_generated_loaded"]
+        and type(saved_count) is int
+        and saved_count >= 102
+    ):
+        st.session_state["blogs_generated"] = saved_count
+        st.session_state["blogs_generated_loaded"] = True
+
+if storage_error:
+    st.warning(f"Could not persist the blog count in this browser: {storage_error}")
+
 blogs_generated_metric = st.empty()
 blogs_generated_metric.metric("Blogs generated", st.session_state["blogs_generated"])
 
@@ -189,6 +221,7 @@ def log(msg: str):
     logs.append(msg)
 
 
+generation_finished = False
 if run_btn:
     if not topic.strip():
         st.warning("Please enter a topic.")
@@ -249,6 +282,10 @@ if run_btn:
             )
             status.update(label="✅ Done", state="complete", expanded=False)
             log("[final] received final state")
+            generation_finished = True
+
+if generation_finished:
+    st.rerun()
 
 # Render last result (if any)
 out = st.session_state.get("last_out")
