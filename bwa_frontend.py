@@ -159,7 +159,7 @@ st.set_page_config(page_title="LangGraph Blog Writer", layout="wide")
 
 st.title("Blog Writing Agent")
 if "blogs_generated" not in st.session_state:
-    st.session_state["blogs_generated"] = 0
+    st.session_state["blogs_generated"] = 102
 blogs_generated_metric = st.empty()
 blogs_generated_metric.metric("Blogs generated", st.session_state["blogs_generated"])
 
