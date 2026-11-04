@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import operator
 import os
 import re
 from datetime import date, timedelta
 from pathlib import Path
-from typing import TypedDict, List, Optional, Literal, Annotated
+from typing import TypedDict, List, Optional, Literal, Annotated, TypeVar
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -118,6 +119,56 @@ class State(TypedDict):
 # -----------------------------
 # llm = ChatOpenAI(model="gpt-4.1-mini")
 llm = ChatGroq(model="openai/gpt-oss-120b")
+ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+def _invoke_structured_output(
+    schema: type[ModelT],
+    messages: List[SystemMessage | HumanMessage],
+) -> ModelT:
+    system_message = messages[0]
+    if not isinstance(system_message.content, str):
+        raise ValueError("Structured-output system prompt must be plain text.")
+
+    schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
+    prompt = (
+        f"{system_message.content}\n\n"
+        "Return only one valid JSON object matching this JSON Schema. "
+        "Do not use a tool call, markdown fences, or text outside the JSON object.\n"
+        f"JSON Schema:\n{schema_json}"
+    )
+    response = llm.invoke([SystemMessage(content=prompt), *messages[1:]])
+    if isinstance(response.content, str):
+        response_text = response.content
+    elif isinstance(response.content, list):
+        response_text = "\n".join(
+            item["text"]
+            for item in response.content
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        )
+    else:
+        response_text = ""
+
+    decoder = json.JSONDecoder()
+    parsed = None
+    for start, character in enumerate(response_text):
+        if character != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(response_text[start:])
+            break
+        except json.JSONDecodeError:
+            continue
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{schema.__name__} response did not contain a JSON object.")
+
+    if (
+        parsed.get("name") == schema.__name__
+        and isinstance(parsed.get("arguments"), dict)
+    ):
+        parsed = parsed["arguments"]
+    return schema.model_validate(parsed)
+
 
 # -----------------------------
 # 3) Router
@@ -137,12 +188,12 @@ If needs_research=true:
 """
 
 def router_node(state: State) -> dict:
-    decider = llm.with_structured_output(RouterDecision)
-    decision = decider.invoke(
+    decision = _invoke_structured_output(
+        RouterDecision,
         [
             SystemMessage(content=ROUTER_SYSTEM),
             HumanMessage(content=f"Topic: {state['topic']}\nAs-of date: {state['as_of']}"),
-        ]
+        ],
     )
 
     if decision.mode == "open_book":
@@ -227,8 +278,8 @@ def research_node(state: State) -> dict:
         for result in raw[:10]
     ]
 
-    extractor = llm.with_structured_output(EvidencePack)
-    pack = extractor.invoke(
+    pack = _invoke_structured_output(
+        EvidencePack,
         [
             SystemMessage(content=RESEARCH_SYSTEM),
             HumanMessage(
@@ -238,7 +289,7 @@ def research_node(state: State) -> dict:
                     f"Raw results:\n{raw}"
                 )
             ),
-        ]
+        ],
     )
 
     dedup = {}
@@ -276,13 +327,13 @@ Output must match Plan schema.
 """
 
 def orchestrator_node(state: State) -> dict:
-    planner = llm.with_structured_output(Plan)
     mode = state.get("mode", "closed_book")
     evidence = state.get("evidence", [])
 
     forced_kind = "news_roundup" if mode == "open_book" else None
 
-    plan = planner.invoke(
+    plan = _invoke_structured_output(
+        Plan,
         [
             SystemMessage(content=ORCH_SYSTEM),
             HumanMessage(
@@ -294,7 +345,7 @@ def orchestrator_node(state: State) -> dict:
                     f"Evidence:\n{[e.model_dump() for e in evidence][:16]}"
                 )
             ),
-        ]
+        ],
     )
     if forced_kind:
         plan.blog_kind = "news_roundup"
@@ -430,47 +481,24 @@ def decide_images(state: State) -> dict:
         heading for heading in headings if not re.match(r"^#\s", heading)
     ] or headings
 
-    response = llm.invoke(
-        [
-            SystemMessage(content=DECIDE_IMAGES_SYSTEM),
-            HumanMessage(
-                content=(
-                    f"Blog kind: {plan.blog_kind}\n"
-                    f"Topic: {state['topic']}\n\n"
-                    "Choose up to 3 useful images based on these section headings. "
-                    "Do not return or rewrite the article. Return only image metadata.\n"
-                    "Available headings:\n"
-                    + "\n".join(section_headings)
-                )
-            ),
-        ]
-    )
-    response_content = response.content
-    if isinstance(response_content, str):
-        response_text = response_content
-    elif isinstance(response_content, list):
-        response_text = "\n".join(
-            item.get("text", "")
-            for item in response_content
-            if isinstance(item, dict) and isinstance(item.get("text"), str)
-        )
-    else:
-        response_text = ""
-
-    json_match = re.search(r"\{[\s\S]*\}", response_text)
-    if not json_match:
-        return {
-            "md_with_placeholders": merged_md,
-            "image_specs": [],
-            "image_planning_warning": (
-                "The image planner did not return JSON, so the blog was generated "
-                "without images. Try generating again to retry image planning."
-            ),
-        }
-
     try:
-        image_plan = GlobalImagePlan.model_validate_json(json_match.group())
-    except ValidationError:
+        image_plan = _invoke_structured_output(
+            GlobalImagePlan,
+            [
+                SystemMessage(content=DECIDE_IMAGES_SYSTEM),
+                HumanMessage(
+                    content=(
+                        f"Blog kind: {plan.blog_kind}\n"
+                        f"Topic: {state['topic']}\n\n"
+                        "Choose up to 3 useful images based on these section headings. "
+                        "Do not return or rewrite the article. Return only image metadata.\n"
+                        "Available headings:\n"
+                        + "\n".join(section_headings)
+                    )
+                ),
+            ],
+        )
+    except (ValueError, ValidationError):
         return {
             "md_with_placeholders": merged_md,
             "image_specs": [],
