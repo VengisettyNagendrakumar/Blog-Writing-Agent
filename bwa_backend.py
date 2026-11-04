@@ -110,6 +110,7 @@ class State(TypedDict):
     md_with_placeholders: str
     image_specs: List[dict]
     image_planning_warning: str
+    image_generation_errors: List[str]
 
     final: str
 
@@ -606,12 +607,13 @@ def generate_and_place_images(state: State) -> dict:
 
     md = state.get("md_with_placeholders") or state["merged_md"]
     image_specs = state.get("image_specs", []) or []
+    image_generation_errors: List[str] = []
 
     # If no images requested, just write merged markdown
     if not image_specs:
         filename = f"{_safe_slug(plan.blog_title)}.md"
         Path(filename).write_text(md, encoding="utf-8")
-        return {"final": md}
+        return {"final": md, "image_generation_errors": image_generation_errors}
 
     images_dir = Path("images")
     images_dir.mkdir(exist_ok=True)
@@ -627,12 +629,14 @@ def generate_and_place_images(state: State) -> dict:
                 img_bytes = _gemini_generate_image_bytes(spec["prompt"])
                 out_path.write_bytes(img_bytes)
             except Exception as e:
+                error_message = f"{filename}: {type(e).__name__}: {e}"
+                image_generation_errors.append(error_message)
                 # graceful fallback: keep doc usable
                 prompt_block = (
                     f"> **[IMAGE GENERATION FAILED]** {spec.get('caption','')}\n>\n"
                     f"> **Alt:** {spec.get('alt','')}\n>\n"
                     f"> **Prompt:** {spec.get('prompt','')}\n>\n"
-                    f"> **Error:** {e}\n"
+                    f"> **Error:** {error_message}\n"
                 )
                 md = md.replace(placeholder, prompt_block)
                 continue
@@ -642,7 +646,7 @@ def generate_and_place_images(state: State) -> dict:
 
     filename = f"{_safe_slug(plan.blog_title)}.md"
     Path(filename).write_text(md, encoding="utf-8")
-    return {"final": md}
+    return {"final": md, "image_generation_errors": image_generation_errors}
 
 # build reducer subgraph
 reducer_graph = StateGraph(State)

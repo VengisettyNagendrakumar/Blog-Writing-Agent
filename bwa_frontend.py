@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import traceback
 import zipfile
 from datetime import date
 from io import BytesIO
@@ -214,11 +215,12 @@ tab_plan, tab_evidence, tab_preview, tab_images, tab_logs = st.tabs(
     ["🧩 Plan", "🔎 Evidence", "📝 Markdown Preview", "🖼️ Images", "🧾 Logs"]
 )
 
-logs: List[str] = []
+if "logs" not in st.session_state:
+    st.session_state["logs"] = []
 
 
 def log(msg: str):
-    logs.append(msg)
+    st.session_state["logs"].append(msg)
 
 
 generation_finished = False
@@ -227,6 +229,9 @@ if run_btn:
         st.warning("Please enter a topic.")
         st.stop()
 
+    st.session_state["logs"] = []
+    st.session_state.pop("generation_error", None)
+    st.session_state["last_out"] = None
     inputs: Dict[str, Any] = {
         "topic": topic.strip(),
         "mode": "",
@@ -241,6 +246,7 @@ if run_btn:
         "md_with_placeholders": "",
         "image_specs": [],
         "image_planning_warning": "",
+        "image_generation_errors": [],
         "final": "",
     }
 
@@ -250,40 +256,50 @@ if run_btn:
     current_state: Dict[str, Any] = {}
     last_node = None
 
-    for kind, payload in try_stream(app, inputs):
-        if kind in ("updates", "values"):
-            node_name = None
-            if isinstance(payload, dict) and len(payload) == 1 and isinstance(next(iter(payload.values())), dict):
-                node_name = next(iter(payload.keys()))
-            if node_name and node_name != last_node:
-                status.write(f"➡️ Node: `{node_name}`")
-                last_node = node_name
+    try:
+        for kind, payload in try_stream(app, inputs):
+            if kind in ("updates", "values"):
+                node_name = None
+                if isinstance(payload, dict) and len(payload) == 1 and isinstance(next(iter(payload.values())), dict):
+                    node_name = next(iter(payload.keys()))
+                if node_name and node_name != last_node:
+                    status.write(f"➡️ Node: `{node_name}`")
+                    last_node = node_name
 
-            current_state = extract_latest_state(current_state, payload)
+                current_state = extract_latest_state(current_state, payload)
 
-            summary = {
-                "mode": current_state.get("mode"),
-                "needs_research": current_state.get("needs_research"),
-                "queries": current_state.get("queries", [])[:5] if isinstance(current_state.get("queries"), list) else [],
-                "evidence_count": len(current_state.get("evidence", []) or []),
-                "tasks": len((current_state.get("plan") or {}).get("tasks", [])) if isinstance(current_state.get("plan"), dict) else None,
-                "images": len(current_state.get("image_specs", []) or []),
-                "sections_done": len(current_state.get("sections", []) or []),
-            }
-            progress_area.json(summary)
+                summary = {
+                    "mode": current_state.get("mode"),
+                    "needs_research": current_state.get("needs_research"),
+                    "queries": current_state.get("queries", [])[:5] if isinstance(current_state.get("queries"), list) else [],
+                    "evidence_count": len(current_state.get("evidence", []) or []),
+                    "tasks": len((current_state.get("plan") or {}).get("tasks", [])) if isinstance(current_state.get("plan"), dict) else None,
+                    "images": len(current_state.get("image_specs", []) or []),
+                    "sections_done": len(current_state.get("sections", []) or []),
+                }
+                progress_area.json(summary)
 
-            log(f"[{kind}] {json.dumps(payload, default=str)[:1200]}")
+                log(f"[{kind}] {json.dumps(payload, default=str)[:1200]}")
 
-        elif kind == "final":
-            out = payload
-            st.session_state["last_out"] = out
-            st.session_state["blogs_generated"] += 1
-            blogs_generated_metric.metric(
-                "Blogs generated", st.session_state["blogs_generated"]
-            )
-            status.update(label="✅ Done", state="complete", expanded=False)
-            log("[final] received final state")
-            generation_finished = True
+            elif kind == "final":
+                out = payload
+                st.session_state["last_out"] = out
+                st.session_state["blogs_generated"] += 1
+                blogs_generated_metric.metric(
+                    "Blogs generated", st.session_state["blogs_generated"]
+                )
+                status.update(label="✅ Done", state="complete", expanded=False)
+                log("[final] received final state")
+                for image_error in out.get("image_generation_errors", []):
+                    log(f"[image generation failed] {image_error}")
+                generation_finished = True
+    except Exception as exc:
+        error_message = f"{type(exc).__name__}: {exc}"
+        st.session_state["generation_error"] = error_message
+        log(f"[generation failed] {error_message}")
+        log(traceback.format_exc())
+        status.update(label="❌ Generation failed", state="error", expanded=True)
+        st.error(f"Blog generation failed: {error_message}. See the Logs tab for details.")
 
 if generation_finished:
     st.rerun()
@@ -392,6 +408,8 @@ if out:
         st.subheader("Images")
         if out.get("image_planning_warning"):
             st.warning(out["image_planning_warning"])
+        for image_error in out.get("image_generation_errors", []):
+            st.error(f"Image generation failed: {image_error}")
         specs = out.get("image_specs") or []
         images_dir = Path("images")
 
@@ -419,14 +437,18 @@ if out:
                         mime="application/zip",
                     )
 
-    # --- Logs tab ---
-    with tab_logs:
-        st.subheader("Logs")
-        if "logs" not in st.session_state:
-            st.session_state["logs"] = []
-        if logs:
-            st.session_state["logs"].extend(logs)
-
-        st.text_area("Event log", value="\n\n".join(st.session_state["logs"][-80:]), height=520)
 else:
     st.info("Enter a topic and click **Generate Blog**.")
+
+with tab_logs:
+    st.subheader("Logs")
+    if st.session_state.get("generation_error"):
+        st.error(st.session_state["generation_error"])
+    if st.session_state["logs"]:
+        st.text_area(
+            "Event log",
+            value="\n\n".join(st.session_state["logs"][-80:]),
+            height=520,
+        )
+    else:
+        st.info("No generation logs yet. Run a blog to see progress and errors here.")
