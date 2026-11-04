@@ -240,6 +240,7 @@ if run_btn:
         "merged_md": "",
         "md_with_placeholders": "",
         "image_specs": [],
+        "image_planning_warning": "",
         "final": "",
     }
 
@@ -389,6 +390,8 @@ if out:
     # --- Images tab ---
     with tab_images:
         st.subheader("Images")
+        if out.get("image_planning_warning"):
+            st.warning(out["image_planning_warning"])
         specs = out.get("image_specs") or []
         images_dir = Path("images")
 

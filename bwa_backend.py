@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import TypedDict, List, Optional, Literal, Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
@@ -86,6 +86,7 @@ class ImageSpec(BaseModel):
 class GlobalImagePlan(BaseModel):
     images: List[ImageSpec] = Field(default_factory=list)
 
+
 class State(TypedDict):
     topic: str
 
@@ -107,6 +108,7 @@ class State(TypedDict):
     merged_md: str
     md_with_placeholders: str
     image_specs: List[dict]
+    image_planning_warning: str
 
     final: str
 
@@ -408,22 +410,27 @@ Rules:
 - Each image must materially improve understanding (diagram/flow/table-like visual).
 - Choose section_heading exactly from the provided Markdown headings.
 - Avoid decorative images; prefer technical diagrams with short labels.
-Return strictly GlobalImagePlan.
+Return only a JSON object with this shape:
+{"images":[{"section_heading":"## Exact heading","filename":"diagram.png","alt":"Short description","caption":"Short caption","prompt":"Image-generation prompt","size":"1024x1024","quality":"medium"}]}
+Use an empty images array if no image would help. Do not include markdown fences or explanatory text.
 """
 
 def decide_images(state: State) -> dict:
-    planner = llm.with_structured_output(GlobalImagePlan)
     merged_md = state["merged_md"]
     plan = state["plan"]
     assert plan is not None
     headings = re.findall(r"^#{1,3}\s+.+$", merged_md, flags=re.MULTILINE)
     if not headings:
-        return {"md_with_placeholders": merged_md, "image_specs": []}
+        return {
+            "md_with_placeholders": merged_md,
+            "image_specs": [],
+            "image_planning_warning": "",
+        }
     section_headings = [
         heading for heading in headings if not re.match(r"^#\s", heading)
     ] or headings
 
-    image_plan = planner.invoke(
+    response = llm.invoke(
         [
             SystemMessage(content=DECIDE_IMAGES_SYSTEM),
             HumanMessage(
@@ -438,6 +445,40 @@ def decide_images(state: State) -> dict:
             ),
         ]
     )
+    response_content = response.content
+    if isinstance(response_content, str):
+        response_text = response_content
+    elif isinstance(response_content, list):
+        response_text = "\n".join(
+            item.get("text", "")
+            for item in response_content
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        )
+    else:
+        response_text = ""
+
+    json_match = re.search(r"\{[\s\S]*\}", response_text)
+    if not json_match:
+        return {
+            "md_with_placeholders": merged_md,
+            "image_specs": [],
+            "image_planning_warning": (
+                "The image planner did not return JSON, so the blog was generated "
+                "without images. Try generating again to retry image planning."
+            ),
+        }
+
+    try:
+        image_plan = GlobalImagePlan.model_validate_json(json_match.group())
+    except ValidationError:
+        return {
+            "md_with_placeholders": merged_md,
+            "image_specs": [],
+            "image_planning_warning": (
+                "The image planner returned invalid image metadata, so the blog "
+                "was generated without images. Try generating again to retry image planning."
+            ),
+        }
 
     image_specs = []
     placements = {}
@@ -472,6 +513,7 @@ def decide_images(state: State) -> dict:
     return {
         "md_with_placeholders": md_with_placeholders,
         "image_specs": image_specs,
+        "image_planning_warning": "",
     }
 
 
