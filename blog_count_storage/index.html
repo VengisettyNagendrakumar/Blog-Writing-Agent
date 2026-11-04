@@ -27,7 +27,9 @@
         const args = event.data.args;
         if (!initialized || storageKey !== args.storage_key) {
           storageKey = args.storage_key;
-          let count = args.initial_count;
+          let count = Number.isSafeInteger(args.count) && args.count >= args.initial_count
+            ? args.count
+            : args.initial_count;
           let error = null;
 
           try {
