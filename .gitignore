@@ -9,6 +9,8 @@
 devcontainer.json
 .devcontainer/
 blog_count_storage/
+!blog_count_storage/
+!blog_count_storage/index.html
 images/
 
 # Virtual environments
